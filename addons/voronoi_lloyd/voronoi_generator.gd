@@ -2,42 +2,30 @@
 class_name VoronoiGenerator
 extends Node2D
 
-## Generates Voronoi diagrams and applies Lloyd's relaxation using Godot 4 features.
+## Generates Voronoi diagrams using iterative clipping and applies Lloyd's relaxation.
 
 # --- Signals ---
-## Emitted when the generation process (including relaxation) is complete.
 signal generation_finished(sites: Array[Vector2], cells: Array[Dictionary])
 
 # --- Exports ---
-## Seed for random point generation. 0 uses a random seed.
 @export var seed : int = 0: set = set_seed
-## Number of initial random points (sites) to generate.
 @export var num_points : int = 50: set = set_num_points
-## The rectangular bounds for point generation and diagram clipping.
+## Bounds are relative to this node's origin (0,0). Use a parent Control node with Clip Contents for visual bounding.
 @export var bounds := Rect2(0, 0, 500, 500): set = set_bounds
-## Number of Lloyd's relaxation iterations to apply.
 @export var lloyd_iterations : int = 3: set = set_lloyd_iterations
-## If true, automatically generate on _ready() or when parameters change in editor.
 @export var generate_on_change := true
 
 ## --- Visualization ---
 @export_group("Visualization")
-## Draw the site points.
 @export var draw_sites := false: set = _set_redraw
-## Draw the edges of the Voronoi cells.
 @export var draw_edges := true: set = _set_redraw
-## Draw the calculated centroids (useful for debugging Lloyd's).
 @export var draw_centroids := false: set = _set_redraw
-## Fill the Voronoi cells with color.
 @export var fill_cells := true: set = _set_redraw
-@export var debug_draw_pre_clip_polygons := true: set = _set_redraw
-## Color for drawing sites.
+## Optional debug view: draws the polygon stored in 'pre_clip_vertices' (should match 'vertices' now)
+@export var debug_draw_pre_clip_polygons := false: set = _set_redraw
 @export var site_color := Color.WHITE
-## Color for drawing edges.
 @export var edge_color := Color.GRAY
-## Color for drawing centroids.
 @export var centroid_color := Color.RED
-## List of colors to cycle through for filling cells.
 @export var cell_colors : Array[Color] = [
 	Color.from_hsv(0.0, 0.6, 0.8), Color.from_hsv(0.1, 0.6, 0.8),
 	Color.from_hsv(0.2, 0.6, 0.8), Color.from_hsv(0.3, 0.6, 0.8),
@@ -47,16 +35,17 @@ signal generation_finished(sites: Array[Vector2], cells: Array[Dictionary])
 ]
 
 # --- Internal State ---
-var _sites: Array[Vector2] = [] # The input points (using standard Array for flexibility during relaxation)
-# Cells store the site and its vertices (PackedVector2Array for performance)
-# Structure: [{ "site": Vector2, "vertices": PackedVector2Array }, ...]
+var _sites: Array[Vector2] = [] # Current site positions (updated by Lloyd's)
+# Structure: [{ "site": Vector2, "vertices": PackedVector2Array, "pre_clip_vertices": PackedVector2Array}, ...]
+# Note: 'vertices' and 'pre_clip_vertices' should be identical with S-H method
 var _cells: Array[Dictionary] = []
-var _centroids: Array[Vector2] = [] # Calculated centroids for Lloyd's
+var _centroids: Array[Vector2] = []
 var _needs_regeneration := true
-var _bounds_polygon: PackedVector2Array # Cache bounds as polygon (Godot 4 uses PackedVector2Array)
+# No _bounds_polygon needed for S-H method, bounds rect used directly
 
 func _init():
-	_update_bounds_polygon()
+	# No _update_bounds_polygon needed
+	pass
 
 # --- Setters ---
 func set_seed(value: int):
@@ -67,83 +56,65 @@ func set_seed(value: int):
 
 func set_num_points(value: int):
 	if num_points != value:
-		num_points = max(0, value) # Ensure non-negative
+		num_points = max(0, value)
 		_needs_regeneration = true
 		_trigger_generation_and_redraw()
 
-# Modify set_bounds to ensure position is always (0,0) internally
 func set_bounds(value: Rect2):
 	# Ensure bounds position is always zero for the parent clipping approach
 	var new_bounds = Rect2(Vector2.ZERO, value.size)
 	if bounds != new_bounds:
-		bounds = new_bounds # Store only size, position is implicitly (0,0)
-		_update_bounds_polygon()
+		bounds = new_bounds
 		_needs_regeneration = true
 		_trigger_generation_and_redraw()
-	# If only size changed but position was already 0,0
-	elif bounds.size != value.size:
+	elif bounds.size != value.size: # Handle size-only change
 		bounds = new_bounds
-		_update_bounds_polygon()
 		_needs_regeneration = true
 		_trigger_generation_and_redraw()
 
+
 func set_lloyd_iterations(value: int):
 	if lloyd_iterations != value:
-		lloyd_iterations = max(0, value) # Ensure non-negative
+		lloyd_iterations = max(0, value)
 		_needs_regeneration = true
 		_trigger_generation_and_redraw()
 
 func _set_redraw(_value):
-	# Generic setter for visualization flags to trigger redraw
-	queue_redraw() # Use queue_redraw in Godot 4
-
-func _update_bounds_polygon():
-	# Define bounds polygon relative to node's origin (0,0), using bounds.size
-	# This represents the rectangle we *attempt* to clip against internally
-	_bounds_polygon = PackedVector2Array([
-		Vector2.ZERO,
-		Vector2(bounds.size.x, 0.0),
-		bounds.size, # Equivalent to Vector2(bounds.size.x, bounds.size.y)
-		Vector2(0.0, bounds.size.y)
-	])
+	queue_redraw()
 
 func _trigger_generation_and_redraw():
 	if generate_on_change and _needs_regeneration:
-		generate() # Regenerate data
+		generate()
 	else:
-		queue_redraw() # Just redraw if only visualization changed
+		queue_redraw()
 
 # --- Godot Methods ---
 func _ready():
-	# Use queue_redraw instead of update in Godot 4
 	if Engine.is_editor_hint():
 		if generate_on_change and _needs_regeneration:
 			generate()
 		else:
 			queue_redraw()
-	elif generate_on_change: # At runtime
+	elif generate_on_change:
 		generate()
 
 func _draw():
-	# --- Debug Draw (Optional - can remove if not needed) ---
+	# --- Debug Draw (Optional) ---
 	if debug_draw_pre_clip_polygons:
-		# This will now draw the same as the final vertices if calc works
 		var pre_clip_color = Color.YELLOW
 		var vertex_color = Color.ORANGE
 		for i in range(_cells.size()):
-			if _cells[i] and _cells[i].has("pre_clip_vertices"):
+			if _cells[i] and _cells[i].has("pre_clip_vertices"): # Check key existence
 				var verts: PackedVector2Array = _cells[i].pre_clip_vertices
-				if verts.size() >= 2:
+				if verts and verts.size() >= 2: # Check if array is valid
 					for j in range(verts.size()):
 						draw_line(verts[j], verts[(j + 1) % verts.size()], pre_clip_color, 1.0, false)
 					for p in verts: draw_circle(p, 3, vertex_color)
-		# Draw bounds for reference
 		draw_rect(Rect2(Vector2.ZERO, bounds.size), Color.RED.lightened(0.5), false, 2.0)
-		# Optional: return here if only debugging
+		# Optional: return # Uncomment to only show debug draw
 
 	# --- End Debug Draw ---
 
-	# Draw background bounds if no cells exist
 	if _cells.is_empty() and _sites.is_empty():
 		if not debug_draw_pre_clip_polygons:
 			draw_rect(Rect2(Vector2.ZERO, bounds.size), Color.DARK_GRAY, false, 1.0)
@@ -152,21 +123,17 @@ func _draw():
 	# --- Draw Final Cells (Fill and Edges) ---
 	if fill_cells or draw_edges:
 		for i in range(_cells.size()):
-			# Check if cell data and vertices exist and are valid
-			if not _cells.get(i) or not _cells[i].has("vertices"): continue # Safe check using .get()
+			# Use .get() for safer access, check key and validity
+			if not _cells.get(i) or not _cells[i].has("vertices"): continue
 			var cell = _cells[i]
-			# *** Use 'vertices' directly - no fallback or snapping needed ***
 			var vertices_to_draw : PackedVector2Array = cell.vertices
+			if not vertices_to_draw or vertices_to_draw.size() < 3: continue # Skip invalid/degenerate
 
-			if vertices_to_draw.size() < 3: continue # Skip degenerate polygons
-
-			# --- Fill Cell ---
 			if fill_cells:
 				var color_index = i % cell_colors.size()
 				var color = cell_colors[color_index] if not cell_colors.is_empty() else Color.WHITE
 				draw_colored_polygon(vertices_to_draw, color)
 
-			# --- Draw Edges ---
 			if draw_edges:
 				for j in range(vertices_to_draw.size()):
 					var p1 = vertices_to_draw[j]
@@ -174,21 +141,19 @@ func _draw():
 					draw_line(p1, p2, edge_color, 1.0)
 
 	# --- Draw Centroids ---
-	# _calculate_centroids should now work correctly using the accurate 'vertices'
 	if draw_centroids:
-		if _centroids.size() == _cells.size(): # Compare with actual cell count
+		if _centroids.size() == _cells.size():
 			for centroid in _centroids:
 				if is_finite(centroid.x) and is_finite(centroid.y):
 					draw_circle(centroid, 3, centroid_color)
 
 	# --- Draw Sites ---
-	# Draw the sites that were actually processed (unique sites)
 	if draw_sites:
-		for cell in _cells: # Iterate through the generated cells
-			if cell and cell.has("site"):
-				var site = cell.site
-				draw_circle(site, 4, site_color)
-				draw_circle(site, 2, Color.BLACK)
+		# Draw sites based on the potentially modified _sites array
+		for site in _sites:
+			draw_circle(site, 4, site_color)
+			draw_circle(site, 2, Color.BLACK)
+
 
 # --- Core Logic ---
 
@@ -202,17 +167,18 @@ func clear():
 
 ## Generates the initial points, Voronoi diagram, and applies Lloyd's relaxation.
 func generate():
-	print("Generating Voronoi diagram (Godot 4)...")
-	if num_points < 3:
-		printerr("Voronoi generation requires at least 3 points.")
+	print("Generating Voronoi diagram (Sutherland-Hodgman)...")
+	if num_points == 0 :
+		clear()
+		return # Allow zero points without error
+
+	_generate_initial_points()
+	if _sites.is_empty(): # Handle case where num_points was 0 or generation failed
 		clear()
 		return
 
-	_generate_initial_points()
-	_centroids.clear() # Clear previous centroids
-
 	# --- Lloyd's Relaxation Loop ---
-	for i in range(lloyd_iterations + 1): # +1 because we need initial Voronoi
+	for i in range(lloyd_iterations + 1):
 		print("Iteration %d / %d" % [i, lloyd_iterations])
 		# 1. Calculate Voronoi Diagram for current sites
 		var success = _calculate_voronoi()
@@ -222,28 +188,30 @@ func generate():
 
 		# 2. If it's not the last iteration, calculate centroids and update sites
 		if i < lloyd_iterations:
+			# Check if there are cells to process before calculating centroids
+			if _cells.is_empty():
+				print("No cells generated, stopping relaxation.")
+				break
 			_calculate_centroids()
-			if _centroids.size() != _sites.size():
-				printerr("Mismatch between number of centroids (%d) and sites (%d). Stopping relaxation." % [_centroids.size(), _sites.size()])
-				break # Avoid errors if centroid calculation failed for some cells
-
-			# Update sites to be the centroids for the next iteration
-			_sites = _centroids.duplicate() # Use duplicate to avoid reference issues
+			# Site update is now handled within _calculate_centroids
+			if _sites.is_empty(): # Check if site update resulted in empty array
+				print("Site array became empty after centroid update, stopping.")
+				break
 		else:
 			# On the final iteration, centroids might still be useful for drawing
-			if draw_centroids:
+			if draw_centroids and not _cells.is_empty():
 				_calculate_centroids()
-
 
 	_needs_regeneration = false
 	queue_redraw()
 	print("Generation finished.")
-	# Use new signal emission syntax in Godot 4
-	generation_finished.emit(_sites, _cells)
+	generation_finished.emit(get_sites(), get_cells()) # Emit copies
 
 
 func _generate_initial_points():
 	_sites.clear()
+	if num_points <= 0: return # Don't generate if count is zero or less
+
 	if seed == 0: randomize()
 	else: seed(seed)
 
@@ -251,38 +219,71 @@ func _generate_initial_points():
 	if seed != 0: rng.seed = seed
 
 	for _i in range(num_points):
-		# Generate points within the bounds size, relative to node's (0,0)
 		var px = rng.randf_range(0.0, bounds.size.x)
 		var py = rng.randf_range(0.0, bounds.size.y)
 		_sites.append(Vector2(px, py))
 
+
+## Clips a polygon using the Sutherland-Hodgman algorithm against a single line (half-plane).
+## Keeps the side where dot(point - point_on_line, normal) >= 0.
+func _clip_polygon_sutherland_hodgman(subject_polygon: PackedVector2Array,
+									 point_on_line: Vector2, normal: Vector2) -> PackedVector2Array:
+
+	if subject_polygon.size() < 3: return PackedVector2Array()
+
+	var output_list : Array[Vector2] = []
+	var input_polygon = subject_polygon
+
+	# Normalize the normal vector for dot product checks
+	var norm = normal.normalized()
+	# Fallback for zero normal (shouldn't happen with distinct sites)
+	if not is_finite(norm.x) or norm.length_squared() < 1e-9: return subject_polygon
+
+	# Tolerance for floating point comparisons near zero
+	var tolerance : float = 1e-6
+
+	var p1 = input_polygon[input_polygon.size() - 1]
+	var dist_p1 = (p1 - point_on_line).dot(norm)
+
+	for p2_idx in range(input_polygon.size()):
+		var p2 = input_polygon[p2_idx]
+		var dist_p2 = (p2 - point_on_line).dot(norm)
+
+		var p1_is_inside = dist_p1 >= -tolerance
+		var p2_is_inside = dist_p2 >= -tolerance
+
+		if p1_is_inside and p2_is_inside: # Both inside
+			output_list.append(p2)
+		elif p1_is_inside and not p2_is_inside: # Going out
+			var dist_diff = dist_p1 - dist_p2
+			if abs(dist_diff) > tolerance:
+				var intersect_ratio = dist_p1 / dist_diff
+				output_list.append(p1.lerp(p2, intersect_ratio))
+		elif not p1_is_inside and p2_is_inside: # Coming in
+			var dist_diff = dist_p1 - dist_p2
+			if abs(dist_diff) > tolerance:
+				var intersect_ratio = dist_p1 / dist_diff
+				output_list.append(p1.lerp(p2, intersect_ratio))
+			output_list.append(p2)
+		# else: # Both outside - output nothing
+
+		p1 = p2
+		dist_p1 = dist_p2
+
+	return PackedVector2Array(output_list)
+
+
 ## Calculates the Voronoi diagram using iterative Sutherland-Hodgman clipping.
-## Returns true on success, false on major failure.
 func _calculate_voronoi() -> bool:
 	_cells.clear()
 
 	if _sites.is_empty(): return true
-	if _sites.size() == 1:
-		var bounds_poly = PackedVector2Array([ Vector2.ZERO, Vector2(bounds.size.x, 0), bounds.size, Vector2(0, bounds.size.y) ])
-		_cells.append({"site": _sites[0], "vertices": bounds_poly, "pre_clip_vertices": bounds_poly.duplicate()})
-		return true
 
-	# --- Sutherland-Hodgman Approach ---
-	var num_sites = _sites.size()
-	var temp_cells : Array[Dictionary] = []
-	temp_cells.resize(num_sites)
-
-	# Initial bounds polygon
-	var initial_bounds_polygon = PackedVector2Array([
-		Vector2.ZERO, Vector2(bounds.size.x, 0),
-		bounds.size, Vector2(0, bounds.size.y)
-	])
-
-	# --- Pre-filter duplicate sites (Important for this method) ---
+	# --- Pre-filter duplicate sites ---
 	var sites_to_process : Array[Vector2] = []
 	var site_positions_seen = {}
 	for site in _sites:
-		var rounded_pos_str = "%.4f,%.4f" % [site.x, site.y]
+		var rounded_pos_str = "%.4f,%.4f" % [site.x, site.y] # Adjust precision as needed
 		if not site_positions_seen.has(rounded_pos_str):
 			sites_to_process.append(site)
 			site_positions_seen[rounded_pos_str] = true
@@ -290,56 +291,50 @@ func _calculate_voronoi() -> bool:
 	var num_unique_sites = sites_to_process.size()
 	if num_unique_sites < _sites.size():
 		printerr("Warning: Duplicate site positions detected and removed.")
-	if num_unique_sites < 1: return true
+	if num_unique_sites < 1: return true # No unique sites left
+	if num_unique_sites == 1: # Handle single unique site case
+		var bounds_poly = PackedVector2Array([ Vector2.ZERO, Vector2(bounds.size.x, 0), bounds.size, Vector2(0, bounds.size.y) ])
+		_cells.append({"site": sites_to_process[0], "vertices": bounds_poly, "pre_clip_vertices": bounds_poly.duplicate()})
+		_sites = sites_to_process # Update _sites to only contain the unique one
+		return true
 
-	temp_cells.clear()
+	# --- Sutherland-Hodgman Iterative Clipping ---
+	var temp_cells : Array[Dictionary] = []
 	temp_cells.resize(num_unique_sites)
-	# --- End filtering ---
 
+	var initial_bounds_polygon = PackedVector2Array([
+		Vector2.ZERO, Vector2(bounds.size.x, 0),
+		bounds.size, Vector2(0, bounds.size.y)
+	])
 
-	# Process each unique site
 	for i in range(num_unique_sites):
 		var site_s = sites_to_process[i]
-		# Start with the full bounds polygon
 		var current_polygon = initial_bounds_polygon.duplicate()
 
-		# Clip against all *other* unique sites using S-H
 		for j in range(num_unique_sites):
 			if i == j: continue
-
 			var site_o = sites_to_process[j]
 
-			# Calculate perpendicular bisector components
 			var mid = (site_s + site_o) * 0.5
 			var dir_s_to_o = site_o - site_s
 			var len_sq = dir_s_to_o.length_squared()
-			if len_sq < 1e-9: continue # Skip coincident points
+			if len_sq < 1e-9: continue
 
 			var dir_s_to_o_normalized = dir_s_to_o / sqrt(len_sq)
-			# Normal vector pointing from bisector towards site_s (the half-plane to keep)
-			var normal_to_s = -dir_s_to_o_normalized
+			var normal_to_s = -dir_s_to_o_normalized # Normal points towards site_s
 
-			# Clip current_polygon against the line defined by (mid, normal_to_s)
 			current_polygon = _clip_polygon_sutherland_hodgman(current_polygon, mid, normal_to_s)
 
-			# If polygon becomes degenerate after a clip, stop clipping for this cell
 			if current_polygon.size() < 3:
-				# print("Site %d: Polygon became degenerate after clip against Site %d." % [i, j])
-				current_polygon = PackedVector2Array() # Ensure it's empty
-				break
+				current_polygon = PackedVector2Array()
+				break # Stop early if polygon becomes degenerate
 
-		# Store final result for site i
-		if current_polygon.size() < 3:
-			# print("Site %d (%s): Final polygon degenerate." % [i, str(site_s)])
-			current_polygon = PackedVector2Array()
-
-		# Store in both vertices and pre_clip_vertices for consistency
+		# Store final result
 		temp_cells[i] = {"site": site_s, "vertices": current_polygon, "pre_clip_vertices": current_polygon.duplicate()}
 
 
 	_cells = temp_cells
-
-	# Rebuild _sites based on the sites actually stored in _cells
+	# Update _sites to contain only the unique sites that were processed
 	var final_sites : Array[Vector2] = []
 	for cell_data in _cells:
 		if cell_data and cell_data.has("site"):
@@ -349,66 +344,10 @@ func _calculate_voronoi() -> bool:
 	return true
 
 
-## Clips a polygon using the Sutherland-Hodgman algorithm against a single line (half-plane).
-## Keeps the side where dot(point - point_on_line, normal) >= 0.
-func _clip_polygon_sutherland_hodgman(subject_polygon: PackedVector2Array,
-									 point_on_line: Vector2, normal: Vector2) -> PackedVector2Array:
-
-	if subject_polygon.size() < 3: return PackedVector2Array() # Cannot clip degenerate polygon
-
-	var output_list : Array[Vector2] = []
-	var input_polygon = subject_polygon # Use subject directly
-
-	# Ensure normal is normalized (important for distance checks)
-	var norm = normal.normalized()
-	if not is_finite(norm.x): norm = Vector2(0,1) # Fallback if normal was zero
-
-	# Iterate through each edge of the subject polygon (p1 -> p2)
-	var p1 = input_polygon[input_polygon.size() - 1] # Start with the last vertex
-	for p2_idx in range(input_polygon.size()):
-		var p2 = input_polygon[p2_idx]
-
-		# Calculate signed distance from line for p1 and p2
-		# Positive distance means "inside" the half-plane we want to keep
-		var dist_p1 = (p1 - point_on_line).dot(norm)
-		var dist_p2 = (p2 - point_on_line).dot(norm)
-
-		var p1_is_inside = dist_p1 >= -1e-7 # Use tolerance for floating point checks
-		var p2_is_inside = dist_p2 >= -1e-7
-
-		if p1_is_inside and p2_is_inside:
-			# Case 1: Both points inside - Output p2
-			output_list.append(p2)
-		elif p1_is_inside and not p2_is_inside:
-			# Case 2: Edge goes from inside to outside - Output intersection
-			if abs(dist_p1 - dist_p2) > 1e-9: # Avoid division by zero if points are very close
-				var intersect_ratio = dist_p1 / (dist_p1 - dist_p2)
-				var intersection_point = p1.lerp(p2, intersect_ratio)
-				output_list.append(intersection_point)
-			# else: print("SH Clip: Degenerate edge detected (inside->outside)") # Optional debug
-		elif not p1_is_inside and p2_is_inside:
-			# Case 3: Edge goes from outside to inside - Output intersection, then p2
-			if abs(dist_p1 - dist_p2) > 1e-9: # Avoid division by zero
-				var intersect_ratio = dist_p1 / (dist_p1 - dist_p2)
-				var intersection_point = p1.lerp(p2, intersect_ratio)
-				output_list.append(intersection_point)
-			# else: print("SH Clip: Degenerate edge detected (outside->inside)") # Optional debug
-			output_list.append(p2)
-		# Case 4: Both points outside - Output nothing
-
-		# Move to next edge
-		p1 = p2
-
-	return PackedVector2Array(output_list) # Return the clipped vertices
-
-
 ## Calculates the geometric centroid of a polygon.
-## Returns the original site position as fallback for degenerate polygons.
 func _calculate_polygon_centroid(polygon: PackedVector2Array, fallback_point: Vector2) -> Vector2:
 	var n = polygon.size()
-	if n < 3:
-		# print("Centroid calc helper: Polygon has < 3 vertices. Using fallback.")
-		return fallback_point # Cannot calculate centroid for line/point
+	if n < 3: return fallback_point
 
 	var area : float = 0.0
 	var centroid_x : float = 0.0
@@ -416,171 +355,89 @@ func _calculate_polygon_centroid(polygon: PackedVector2Array, fallback_point: Ve
 
 	for i in range(n):
 		var p1 = polygon[i]
-		var p2 = polygon[(i + 1) % n] # Wrap around for the last vertex
-
-		# Cross product (for area and centroid calculation)
-		var cross_product = p1.cross(p2) # Equivalent to p1.x * p2.y - p1.y * p2.x
-
+		var p2 = polygon[(i + 1) % n]
+		var cross_product = p1.cross(p2)
 		area += cross_product
 		centroid_x += (p1.x + p2.x) * cross_product
 		centroid_y += (p1.y + p2.y) * cross_product
 
-	# Finalize area calculation
 	area *= 0.5
-
-	# Avoid division by zero for degenerate polygons (collinear points, zero area)
-	if abs(area) < 1e-9: # Use a small epsilon for float comparison
-		# print("Centroid calc helper: Degenerate polygon (area close to zero). Using fallback.")
-		# Fallback: Calculate average of vertices, or just use the site position
-		# Averaging vertices is simple:
-		# var avg_pos = Vector2.ZERO
-		# for p in polygon: avg_pos += p
-		# return avg_pos / n
-		# Using fallback_point (site position) is often preferred in Lloyd's context:
-		return fallback_point
+	if abs(area) < 1e-9: return fallback_point
 	else:
-		# Finalize centroid calculation
 		var factor = 1.0 / (6.0 * area)
 		centroid_x *= factor
 		centroid_y *= factor
+		# Check for NaN/Inf just in case
+		if not is_finite(centroid_x) or not is_finite(centroid_y): return fallback_point
 		return Vector2(centroid_x, centroid_y)
 
-## Calculates the circumcenter of a triangle defined by p1, p2, p3.
-## Returns Vector2.INF if points are collinear. (No changes needed here)
-func _calculate_circumcenter(p1: Vector2, p2: Vector2, p3: Vector2) -> Vector2:
-	var d = 2 * (p1.x * (p2.y - p3.y) + p2.x * (p3.y - p1.y) + p3.x * (p1.y - p2.y))
-	if abs(d) < 1e-9:
-		return Vector2.INF # Indicate degeneracy
 
-	var p1_sq = p1.length_squared()
-	var p2_sq = p2.length_squared()
-	var p3_sq = p3.length_squared()
-
-	var center_x = (p1_sq * (p2.y - p3.y) + p2_sq * (p3.y - p1.y) + p3_sq * (p1.y - p2.y)) / d
-	var center_y = (p1_sq * (p3.x - p2.x) + p2_sq * (p1.x - p3.x) + p3_sq * (p2.x - p1.x)) / d
-
-	return Vector2(center_x, center_y)
-
-
-func _sort_points_angularly(p_center: Vector2, p_points: Array[Vector2]) -> Array[Vector2]:
-	if p_points.size() < 2:
-		return p_points # No sorting needed
-
-	# Filter out points that are virtually identical to the center
-	var points_to_sort : Array[Vector2] = []
-	for p in p_points:
-		# Use a small tolerance for floating point comparison
-		if (p - p_center).length_squared() > 1e-9: # Avoid sqrt for efficiency
-			points_to_sort.append(p)
-		#else:
-			# Optional: print("Filtered out point coincident with center during sort: %s" % str(p))
-
-
-	if points_to_sort.size() < 2:
-		# If filtering left too few points, return them
-		# print("Angular sort: < 2 points remaining after filtering coincident points.")
-		return points_to_sort # Result might be empty or single point
-
-	# Use a custom sorter based on angle
-	points_to_sort.sort_custom(func(a, b):
-		var angle_a = (a - p_center).angle()
-		var angle_b = (b - p_center).angle()
-		return angle_a < angle_b
-	)
-	return points_to_sort
-
-
-## Calculates the geometric centroid for each Voronoi cell,
-## using the accurately calculated 'vertices' and clamping the result.
+## Calculates the geometric centroid for each Voronoi cell and clamps the result.
 func _calculate_centroids():
-	# Calculate based on the actual number of cells generated
 	var num_cells = _cells.size()
-	_centroids.clear()
-	_centroids.resize(num_cells) # Resize based on actual cell count
+	if num_cells == 0:
+		_centroids.clear()
+		return # No cells to process
 
-	# Define the min and max corners for clamping based on bounds.size
+	_centroids.clear()
+	_centroids.resize(num_cells)
+
 	var clamp_min = Vector2.ZERO
 	var clamp_max = bounds.size
 
-	# Iterate through the generated cells
 	for i in range(num_cells):
-		# --- Determine fallback position ---
-		var fallback_pos : Vector2 = Vector2.ZERO
-		if _cells[i] and _cells[i].has("site"):
-			fallback_pos = _cells[i].site
-		# elif i < _sites.size(): fallback_pos = _sites[i] # Less reliable if duplicates removed
-
-		# --- Get Polygon ---
+		var fallback_pos = _cells[i].site if (_cells.get(i) and _cells[i].has("site")) else Vector2.ZERO
 		var polygon_for_centroid := PackedVector2Array()
-		if _cells[i] and _cells[i].has("vertices") and _cells[i].vertices and _cells[i].vertices.size() >= 3:
-			polygon_for_centroid = _cells[i].vertices
-		# else: print("Centroid Calc: Cell %d has no valid vertices." % i)
 
-		# --- Calculate Centroid ---
+		if _cells.get(i) and _cells[i].has("vertices") and _cells[i].vertices and _cells[i].vertices.size() >= 3:
+			polygon_for_centroid = _cells[i].vertices
+
 		var calculated_centroid : Vector2
 		if polygon_for_centroid != null:
 			calculated_centroid = _calculate_polygon_centroid(polygon_for_centroid, fallback_pos)
 		else:
-			calculated_centroid = fallback_pos # Use fallback if no valid polygon
+			calculated_centroid = fallback_pos
 
-		# --- Clamp Centroid to Bounds using Vector2.clamp ---
 		var final_centroid = calculated_centroid.clamp(clamp_min, clamp_max)
 
-		# --- Store Result ---
 		if not is_finite(final_centroid.x) or not is_finite(final_centroid.y):
-			# print("Centroid calc: Clamped centroid is invalid for cell %d. Using fallback pos." % i)
-			_centroids[i] = fallback_pos # Ultimate fallback
+			_centroids[i] = fallback_pos
 		else:
 			_centroids[i] = final_centroid
 
-		# --- Update Original _sites Array for Next Iteration ---
-		# IMPORTANT: We need to map the centroid back to the correct original site index
-		# if duplicates were removed. This is tricky.
-		# For simplicity NOW, let's update the internal _sites array directly with unique sites
-		# after the first iteration. This breaks if the user expects _sites to remain unmodified.
-		# A better approach requires mapping unique back to original indices.
-
-	# --- Simple (but potentially problematic) Site Update ---
-	# After calculating all centroids for the unique sites, update _sites array
-	# This assumes the order in _centroids matches the order of unique sites in _cells
-	if _centroids.size() == num_cells: # Only update if centroid calc completed for all cells
-		# --- Explicitly type new_sites ---
-		var new_sites : Array[Vector2] = []
-		# ---------------------------------
+	# --- Site Update Handled in _calculate_voronoi post-processing ---
+	# The logic at the end of _calculate_voronoi rebuilds _sites based on cells,
+	# and the centroids calculated here will be used in the *next* iteration's _calculate_voronoi.
+	# We need to update _sites array based on _centroids *before* next iteration.
+	if _centroids.size() == num_cells:
+		var next_sites : Array[Vector2] = []
 		for i in range(num_cells):
-			# Check if centroid is valid before adding
+			# Use calculated centroid if valid, otherwise keep old site position
 			if _centroids[i] != null and is_finite(_centroids[i].x) and is_finite(_centroids[i].y):
-				new_sites.append(_centroids[i])
-			else:
-				# If centroid invalid, try to keep the corresponding site from _cells?
-				if i < _cells.size() and _cells[i] and _cells[i].has("site"):
-					new_sites.append(_cells[i].site) # Keep old site position
-				# else: # If we can't find old site, maybe skip? Or add Vector2.ZERO?
-				#   print("Warning: Could not preserve site position during centroid update for index %d" % i)
+				next_sites.append(_centroids[i])
+			elif _cells.get(i) and _cells[i].has("site"): # Fallback to site from cell data
+				next_sites.append(_cells[i].site)
+			# else: # If even cell data is bad, maybe skip or add ZERO?
+			 #   print("Warning: Cannot determine next site position for cell index %d" % i)
 
-
-		# If fewer unique sites than original, the _sites array shrinks.
-		# Assigning Array[Vector2] to Array[Vector2]
-		_sites = new_sites
-	# else: print("Warning: Centroid count did not match cell count. _sites not updated.")
-
-	# --- End Simple Site Update ---
+		# Check if any sites were added before overwriting
+		if not next_sites.is_empty():
+			_sites = next_sites
+		# else: print("Warning: Failed to determine any site positions for next iteration.")
 
 
 # --- Public Methods ---
-
-## Get the current list of site points.
 func get_sites() -> Array[Vector2]:
-	return _sites.duplicate() # Return a copy
+	return _sites.duplicate()
 
-## Get the calculated Voronoi cells.
-## Each cell is a Dictionary: {site: Vector2, vertices: PackedVector2Array}
 func get_cells() -> Array[Dictionary]:
-	var cells_copy = []
+	var cells_copy : Array[Dictionary] = []
 	for cell in _cells:
-		cells_copy.append({
-			"site": cell.site,
-			# Duplicate PackedVector2Array
-			"vertices": cell.vertices.duplicate() if cell.vertices else PackedVector2Array()
-		})
+		# Ensure data exists before trying to copy
+		if cell and cell.has("site") and cell.has("vertices"):
+			cells_copy.append({
+				"site": cell.site,
+				"vertices": cell.vertices.duplicate() if cell.vertices else PackedVector2Array()
+				# No longer need to copy pre_clip_vertices unless debug is needed externally
+			})
 	return cells_copy
