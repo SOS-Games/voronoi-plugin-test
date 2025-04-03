@@ -10,7 +10,6 @@ anchors_preset = 0
 
 [node name="VoronoiGenerator" type="Node2D" parent="."]
 script = ExtResource("1_7ytg5")
-num_points = 1000
-lloyd_iterations = 5
+num_points = 500
 cell_colors = Array[Color]([Color(0.8, 0.32, 0.32, 1), Color(0.8, 0.608, 0.32, 1), Color(0.704, 0.8, 0.32, 1), Color(0.416, 0.8, 0.32, 1), Color(0.32, 0.8, 0.512, 1), Color(0.32, 0.8, 0.8, 1), Color(0.32, 0.512, 0.8, 1), Color(0.416, 0.32, 0.8, 1), Color(0.704, 0.32, 0.8, 1), Color(0.8, 0.32, 0.608, 1)])
 metadata/_custom_type_script = "uid://d3l5r42um7dys"
