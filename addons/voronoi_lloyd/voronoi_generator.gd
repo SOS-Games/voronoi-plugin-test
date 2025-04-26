@@ -95,8 +95,8 @@ func _ready():
 			generate()
 		else:
 			queue_redraw()
-	elif generate_on_change:
-		generate()
+	#elif generate_on_change:
+	#	generate()
 
 func _draw():
 	# --- Debug Draw (Optional) ---
